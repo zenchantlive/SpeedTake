@@ -1,6 +1,6 @@
 # SpeedTake Audio Extractor
 
-SpeedTake is a simple, modern, and cross-platform graphical tool for quickly extracting audio from video files. Built with Python and `ttkbootstrap`, it offers a clean and intuitive user interface with both light and dark themes.
+SpeedTake is an extremely fast, simple, modern, and cross-platform graphical tool for quickly extracting audio from video files. Built with Python and `ttkbootstrap`, it offers a clean and intuitive user interface with both light and dark themes.
 
 <img width="702" height="694" alt="image" src="https://github.com/user-attachments/assets/bed63019-ac99-4b0f-a5bc-489654f5ee28" />
  <!-- Replace with an actual screenshot URL -->
