@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.venv/
+env/
+venv/
+
+# Build and distribution
+build/
+dist/
+*.spec
+
+# IDE and cache files
+.mypy_cache/
+.vscode/
+.idea/
