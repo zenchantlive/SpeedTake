@@ -8,12 +8,15 @@ from tkinter import font
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 from ttkbootstrap.dialogs import Messagebox
-from tkinter import filedialog
+from tkinter import filedialog, simpledialog
 import subprocess
 import threading
 from pathlib import Path
 import os
 import sys
+import shutil
+import tempfile
+from urllib.parse import urlparse
 
 def open_path(path: str):
     """Opens a file or directory in the default application."""
@@ -40,6 +43,7 @@ class SpeedTakeGUI:
         self.output_folder = tk.StringVar()
         self.ffmpeg_path = None
         self.dark_mode = tk.BooleanVar(value=False)
+        self._download_cache = {}
 
         self.setup_styles()
         self.setup_ui()
@@ -119,6 +123,7 @@ class SpeedTakeGUI:
 
         ttk.Button(file_buttons_frame, text="Add Files", command=self.add_files, style="Outline.TButton").pack(side=LEFT, padx=(0, 10))
         ttk.Button(file_buttons_frame, text="Add Folder", command=self.add_folder, style="Outline.TButton").pack(side=LEFT, padx=(0, 10))
+        ttk.Button(file_buttons_frame, text="Add YouTube Link", command=self.add_youtube_link, style="Outline.TButton").pack(side=LEFT, padx=(0, 10))
         ttk.Button(file_buttons_frame, text="Clear List", command=self.clear_files, style="Outline.TButton", bootstyle="danger").pack(side=LEFT)
 
         # --- Output Options (Step 2) --- #
@@ -183,9 +188,10 @@ class SpeedTakeGUI:
         filetypes = [("Video files", "*.mp4 *.avi *.mkv *.mov *.wmv *.flv *.webm *.m4v"), ("All files", "*.*")]
         files = filedialog.askopenfilenames(title="Select Video Files", filetypes=filetypes)
         for file in files:
-            if file not in self.selected_files:
-                self.selected_files.append(file)
-                self.file_listbox.insert(tk.END, Path(file).name)
+            record = {"type": "file", "path": Path(file)}
+            if not self._record_exists(record):
+                self.selected_files.append(record)
+                self.file_listbox.insert(tk.END, self._format_record_label(record))
 
     def add_folder(self):
         folder = filedialog.askdirectory(title="Select Folder with Video Files")
@@ -196,9 +202,24 @@ class SpeedTakeGUI:
                 Messagebox.show_info("No video files found in the selected folder.", "No Videos Found")
                 return
             for file in video_files:
-                if file not in self.selected_files:
-                    self.selected_files.append(file)
-                    self.file_listbox.insert(tk.END, Path(file).name)
+                record = {"type": "file", "path": Path(file)}
+                if not self._record_exists(record):
+                    self.selected_files.append(record)
+                    self.file_listbox.insert(tk.END, self._format_record_label(record))
+
+    def add_youtube_link(self):
+        url = simpledialog.askstring("Add YouTube Link", "Enter the YouTube video URL:")
+        if url:
+            url = url.strip()
+            if not self._is_valid_youtube_url(url):
+                Messagebox.show_error("Please enter a valid YouTube URL.", title="Invalid URL")
+                return
+            record = {"type": "url", "value": url}
+            if not self._record_exists(record):
+                self.selected_files.append(record)
+                self.file_listbox.insert(tk.END, self._format_record_label(record))
+            else:
+                Messagebox.show_info("This YouTube link is already in the list.", title="Duplicate Link")
 
     def clear_files(self):
         self.selected_files.clear()
@@ -227,22 +248,46 @@ class SpeedTakeGUI:
         success_count = 0
         total_files = len(self.selected_files)
         last_output_path = None
-        output_dir = self.output_folder.get() or None
+        output_dir_value = (self.output_folder.get() or "").strip()
+        output_dir = Path(output_dir_value) if output_dir_value else None
 
-        for i, input_file in enumerate(self.selected_files):
+        for i, record in enumerate(self.selected_files):
+            temp_download_path = None
+            display_name = None
             try:
-                input_path = Path(input_file)
-                out_path = Path(output_dir) if output_dir else input_path.parent
+                record_type = record.get("type")
+                if record_type == "file":
+                    input_path = Path(record["path"])
+                    display_name = input_path.name
+                elif record_type == "url":
+                    display_name = record["value"]
+                    self.root.after(0, lambda msg=f"Downloading {display_name}...": self.status_label.config(text=msg, bootstyle="info"))
+                    input_path = self.download_youtube_audio(record["value"], output_dir)
+                    temp_download_path = input_path
+                else:
+                    raise ValueError(f"Unknown record type: {record}")
+
+                if not input_path.exists():
+                    raise FileNotFoundError(f"Input not found: {input_path}")
+
+                if output_dir:
+                    out_path = output_dir
+                elif record_type == "file":
+                    out_path = input_path.parent
+                else:
+                    out_path = Path.cwd()
+
                 out_path.mkdir(parents=True, exist_ok=True)
                 output_file = out_path / f"{input_path.stem}.{self.output_format.get()}"
 
-                status_msg = f"Processing {i+1}/{total_files}: {input_path.name}"
-                self.root.after(0, self.status_label.config, {"text": status_msg})
+                status_msg = f"Processing {i+1}/{total_files}: {display_name or input_path.name}"
+                self.root.after(0, lambda msg=status_msg: self.status_label.config(text=msg, bootstyle="info"))
 
                 cmd = [self.ffmpeg_path, '-i', str(input_path), '-vn', '-y']
                 acodec_map = {'mp3': 'libmp3lame', 'wav': 'pcm_s16le', 'flac': 'flac', 'aac': 'aac'}
                 codec = acodec_map.get(self.output_format.get())
-                if codec: cmd.extend(['-acodec', codec])
+                if codec:
+                    cmd.extend(['-acodec', codec])
                 cmd.append(str(output_file))
 
                 result = subprocess.run(cmd, capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
@@ -251,11 +296,109 @@ class SpeedTakeGUI:
                     success_count += 1
                     last_output_path = str(output_file)
                 else:
-                    self.root.after(0, lambda err=result.stderr: print(f"Error processing {input_file}: {err}"))
+                    error_message = result.stderr.strip() or "Unknown FFmpeg error"
+                    self.root.after(0, lambda err_msg=error_message, name=display_name or input_path.name: self.status_label.config(text=f"Error processing {name}: {err_msg}", bootstyle="danger"))
             except Exception as e:
-                self.root.after(0, lambda err=e: print(f"Error processing {input_file}: {err}"))
+                if display_name:
+                    name = display_name
+                elif record_type == "file":
+                    name = Path(record.get("path")).name if record.get("path") else "Unknown file"
+                elif record_type == "url":
+                    name = record.get("value", "Unknown URL")
+                else:
+                    name = str(record)
+                self.root.after(0, lambda err=e, rec_name=name: self.status_label.config(text=f"Error processing {rec_name}: {err}", bootstyle="danger"))
+            finally:
+                if temp_download_path:
+                    self._cleanup_downloaded_file(temp_download_path)
 
         self.root.after(0, self.extraction_complete, success_count, total_files, last_output_path)
+
+    def download_youtube_audio(self, url, output_dir=None):
+        try:
+            from yt_dlp import YoutubeDL
+        except ImportError as exc:
+            raise RuntimeError("yt_dlp is required to download YouTube audio. Please install it from requirements.txt.") from exc
+
+        destination_dir = Path(output_dir) if output_dir else Path(tempfile.mkdtemp(prefix="speedtake_yt_"))
+        destination_dir.mkdir(parents=True, exist_ok=True)
+
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': str(destination_dir / '%(title)s.%(id)s.%(ext)s'),
+            'noplaylist': True,
+            'quiet': True,
+            'no_warnings': True,
+        }
+
+        downloaded_file = None
+        try:
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                if not info:
+                    raise RuntimeError("No information returned from YouTube download.")
+                if info.get('requested_downloads'):
+                    downloaded_file = Path(info['requested_downloads'][0]['filepath'])
+                else:
+                    downloaded_file = Path(ydl.prepare_filename(info))
+        except Exception as exc:
+            if not output_dir:
+                shutil.rmtree(destination_dir, ignore_errors=True)
+            raise RuntimeError(f"Failed to download YouTube audio: {exc}") from exc
+
+        if not downloaded_file or not downloaded_file.exists():
+            if not output_dir:
+                shutil.rmtree(destination_dir, ignore_errors=True)
+            raise RuntimeError("The downloaded audio file could not be located.")
+
+        is_temp = not bool(output_dir)
+        self._download_cache[downloaded_file] = {
+            "temp_dir": destination_dir if is_temp else None,
+            "remove_file": True,
+        }
+
+        return downloaded_file
+
+    def _cleanup_downloaded_file(self, downloaded_path):
+        path = Path(downloaded_path)
+        info = self._download_cache.pop(path, None) or {"temp_dir": None, "remove_file": True}
+
+        if info.get("remove_file") and path.exists():
+            try:
+                path.unlink()
+            except Exception:
+                pass
+
+        temp_dir = info.get("temp_dir")
+        if temp_dir and Path(temp_dir).exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def _record_exists(self, record):
+        for existing in self.selected_files:
+            if existing.get("type") != record.get("type"):
+                continue
+            if record.get("type") == "file" and Path(existing.get("path")) == Path(record.get("path")):
+                return True
+            if record.get("type") == "url" and existing.get("value") == record.get("value"):
+                return True
+        return False
+
+    def _format_record_label(self, record):
+        if record.get("type") == "file":
+            return Path(record.get("path")).name
+        if record.get("type") == "url":
+            return f"YouTube: {record.get('value')}"
+        return str(record)
+
+    def _is_valid_youtube_url(self, url):
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return False
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return False
+        domain = parsed.netloc.lower()
+        return "youtube.com" in domain or "youtu.be" in domain
 
     def extraction_complete(self, success_count, total_files, last_output_path):
         self.progress.stop()

@@ -42,6 +42,7 @@ try {
         "--windowed",
         "--name","SpeedTake",
         "--add-binary","$ffmpegPath;.",
+        "--hidden-import","yt_dlp",
         $EntryPoint
     )
 
