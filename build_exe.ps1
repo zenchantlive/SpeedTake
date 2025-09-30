@@ -42,6 +42,7 @@ try {
         "--windowed",
         "--name","SpeedTake",
         "--add-binary","$ffmpegPath;.",
+        "--collect-all","PySide6",
         $EntryPoint
     )
 
