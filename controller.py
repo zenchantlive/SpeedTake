@@ -103,12 +103,13 @@ class SpeedTakeController:
     def check_ffmpeg(self, exe_dir: Optional[Path] = None) -> bool:
         """Locate a working ffmpeg binary."""
 
+        ffmpeg_binary_name = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
         search_candidates: List[str] = []
         if exe_dir:
-            candidate = exe_dir / "ffmpeg.exe"
+            candidate = exe_dir / ffmpeg_binary_name
             if candidate.exists():
                 search_candidates.append(str(candidate))
-        search_candidates.append("ffmpeg.exe" if sys.platform == "win32" else "ffmpeg")
+        search_candidates.append(ffmpeg_binary_name)
 
         for candidate in search_candidates:
             try:
