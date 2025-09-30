@@ -49,7 +49,7 @@ class ExtractionWorker(QThread):
 
     status_updated = Signal(str)
     progress_updated = Signal(int, int)
-    completed = Signal(object)
+    completed = Signal(ExtractionResult)
 
     def __init__(self, controller: SpeedTakeController) -> None:
         super().__init__()
