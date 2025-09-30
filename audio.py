@@ -15,6 +15,8 @@ from pathlib import Path
 import os
 import sys
 
+from controller import SpeedTakeController
+
 def open_path(path: str):
     """Opens a file or directory in the default application."""
     try:
@@ -35,10 +37,9 @@ class SpeedTakeGUI:
         self.root.minsize(600, 550)
 
         # Variables
-        self.selected_files = []
+        self.controller = SpeedTakeController()
         self.output_format = tk.StringVar(value="mp3")
         self.output_folder = tk.StringVar()
-        self.ffmpeg_path = None
         self.dark_mode = tk.BooleanVar(value=False)
 
         self.setup_styles()
@@ -165,57 +166,65 @@ class SpeedTakeGUI:
 
     def check_ffmpeg(self):
         """Check if ffmpeg is available"""
-        try:
-            exe_dir = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path().cwd()
-            ffmpeg_path = exe_dir / 'ffmpeg.exe'
-            if not ffmpeg_path.exists():
-                ffmpeg_path = 'ffmpeg'
-
-            subprocess.run([str(ffmpeg_path), '-version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
-            self.ffmpeg_path = str(ffmpeg_path)
+        exe_dir = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path().cwd()
+        if self.controller.check_ffmpeg(exe_dir):
             self.status_label.config(text="FFmpeg found - Ready to extract audio", bootstyle="success")
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            self.ffmpeg_path = None
+        else:
             self.status_label.config(text="WARNING: FFmpeg not found! Please install it and ensure it's in the PATH.", bootstyle="danger")
             Messagebox.show_warning("FFmpeg is required but not found.\n\nPlease install FFmpeg from https://ffmpeg.org/download.html", "FFmpeg Not Found")
 
     def add_files(self):
         filetypes = [("Video files", "*.mp4 *.avi *.mkv *.mov *.wmv *.flv *.webm *.m4v"), ("All files", "*.*")]
         files = filedialog.askopenfilenames(title="Select Video Files", filetypes=filetypes)
-        for file in files:
-            if file not in self.selected_files:
-                self.selected_files.append(file)
-                self.file_listbox.insert(tk.END, Path(file).name)
+        new_files = self.controller.add_files(files)
+        for file in new_files:
+            self.file_listbox.insert(tk.END, Path(file).name)
 
     def add_folder(self):
         folder = filedialog.askdirectory(title="Select Folder with Video Files")
         if folder:
-            video_extensions = {'.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v'}
-            video_files = [str(f) for f in Path(folder).glob("**/*") if f.suffix.lower() in video_extensions]
-            if not video_files:
+            try:
+                new_files, total_found = self.controller.add_folder(folder)
+            except FileNotFoundError:
+                Messagebox.show_error("The selected folder could not be found.", "Folder Not Found")
+                return
+
+            if total_found == 0:
                 Messagebox.show_info("No video files found in the selected folder.", "No Videos Found")
                 return
-            for file in video_files:
-                if file not in self.selected_files:
-                    self.selected_files.append(file)
-                    self.file_listbox.insert(tk.END, Path(file).name)
+
+            if not new_files:
+                Messagebox.show_info("All supported video files in this folder are already listed.", "No New Files")
+                return
+
+            for file in new_files:
+                self.file_listbox.insert(tk.END, Path(file).name)
 
     def clear_files(self):
-        self.selected_files.clear()
+        self.controller.clear_files()
         self.file_listbox.delete(0, tk.END)
 
     def browse_output_folder(self):
         folder = filedialog.askdirectory(title="Select Output Folder")
         if folder:
             self.output_folder.set(folder)
+            self.controller.set_output_folder(folder)
 
     def start_extraction(self):
-        if not self.selected_files:
+        if not self.controller.selected_files:
             Messagebox.show_warning("Please select one or more video files first.", "No Files Selected")
             return
-        if not self.ffmpeg_path:
+
+        try:
+            self.controller.set_output_format(self.output_format.get())
+        except ValueError as exc:
+            Messagebox.show_error(str(exc), "Unsupported Format")
+            return
+        self.controller.set_output_folder(self.output_folder.get() or None)
+
+        if not self.controller.ffmpeg_path:
             self.check_ffmpeg()
-            if not self.ffmpeg_path:
+            if not self.controller.ffmpeg_path:
                 return
 
         self.extract_button.config(state='disabled')
@@ -224,38 +233,25 @@ class SpeedTakeGUI:
         threading.Thread(target=self.extract_audio_files, daemon=True).start()
 
     def extract_audio_files(self):
-        success_count = 0
-        total_files = len(self.selected_files)
-        last_output_path = None
-        output_dir = self.output_folder.get() or None
+        def status_callback(index: int, total: int, filename: str):
+            status_msg = f"Processing {index}/{total}: {filename}"
+            self.root.after(0, self.status_label.config, {"text": status_msg})
 
-        for i, input_file in enumerate(self.selected_files):
-            try:
-                input_path = Path(input_file)
-                out_path = Path(output_dir) if output_dir else input_path.parent
-                out_path.mkdir(parents=True, exist_ok=True)
-                output_file = out_path / f"{input_path.stem}.{self.output_format.get()}"
+        def error_callback(path: str, error: Exception):
+            self.root.after(0, lambda p=path, e=error: print(f"Error processing {p}: {e}"))
 
-                status_msg = f"Processing {i+1}/{total_files}: {input_path.name}"
-                self.root.after(0, self.status_label.config, {"text": status_msg})
+        result = self.controller.extract_audio_files(
+            status_callback=status_callback,
+            error_callback=error_callback,
+        )
 
-                cmd = [self.ffmpeg_path, '-i', str(input_path), '-vn', '-y']
-                acodec_map = {'mp3': 'libmp3lame', 'wav': 'pcm_s16le', 'flac': 'flac', 'aac': 'aac'}
-                codec = acodec_map.get(self.output_format.get())
-                if codec: cmd.extend(['-acodec', codec])
-                cmd.append(str(output_file))
-
-                result = subprocess.run(cmd, capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
-
-                if result.returncode == 0:
-                    success_count += 1
-                    last_output_path = str(output_file)
-                else:
-                    self.root.after(0, lambda err=result.stderr: print(f"Error processing {input_file}: {err}"))
-            except Exception as e:
-                self.root.after(0, lambda err=e: print(f"Error processing {input_file}: {err}"))
-
-        self.root.after(0, self.extraction_complete, success_count, total_files, last_output_path)
+        self.root.after(
+            0,
+            self.extraction_complete,
+            result.success_count,
+            result.total_files,
+            result.last_output_path,
+        )
 
     def extraction_complete(self, success_count, total_files, last_output_path):
         self.progress.stop()
